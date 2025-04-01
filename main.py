@@ -9,7 +9,7 @@ from cryptography.hazmat.primitives import serialization, hashes
 from zeroconf import ServiceBrowser, ServiceInfo, Zeroconf
 
 def show_help():
-    print("""
+    print(""" 
 Available commands:
     discover  - List available peers on the network
     connect   - Connect to a discovered peer
@@ -66,7 +66,7 @@ class PeerListener:
         self.peer_queue.put(peer_info)
         print(peer_info, end="")
         sys.stdout.flush()
-    
+
     def update_service(self, zeroconf, type, name):
         pass
 
@@ -75,27 +75,35 @@ def discover_peers(peer_queue):
         print(peer_queue.get(), end="")
     sys.stdout.flush()
 
-# Modified to include peer's key storage and retrieval mechanism
-class PeerConnection:
-    def __init__(self):
-        self.peers_keys = {}
+def generate_rsa_keys():
+    private_key = rsa.generate_private_key(
+        public_exponent=65537,
+        key_size=2048
+    )
+    public_key = private_key.public_key()
+    return private_key, public_key
 
-    def generate_rsa_keys(self):
-        private_key = rsa.generate_private_key(
-            public_exponent=65537,
-            key_size=2048
-        )
-        public_key = private_key.public_key()
-        return private_key, public_key
+def generate_dh_keys():
+    parameters = dh.generate_parameters(generator=2, key_size=2048)
+    private_key = parameters.generate_private_key()
+    public_key = private_key.public_key()
+    return private_key, public_key
 
-    def generate_dh_keys(self):
-        parameters = dh.generate_parameters(generator=2, key_size=2048)
-        private_key = parameters.generate_private_key()
-        public_key = private_key.public_key()
-        return private_key, public_key
+def sign_message(private_key, message):
+    signature = private_key.sign(
+        message,
+        padding.PSS(
+            mgf=padding.MGF1(hashes.SHA256()),
+            salt_length=padding.PSS.MAX_LENGTH
+        ),
+        hashes.SHA256()
+    )
+    return signature
 
-    def sign_message(self, private_key, message):
-        signature = private_key.sign(
+def verify_signature(public_key, message, signature):
+    try:
+        public_key.verify(
+            signature,
             message,
             padding.PSS(
                 mgf=padding.MGF1(hashes.SHA256()),
@@ -103,124 +111,117 @@ class PeerConnection:
             ),
             hashes.SHA256()
         )
-        return signature
+        return True
+    except:
+        return False
 
-    def verify_signature(self, public_key, message, signature):
-        try:
-            public_key.verify(
-                signature,
-                message,
-                padding.PSS(
-                    mgf=padding.MGF1(hashes.SHA256()),
-                    salt_length=padding.PSS.MAX_LENGTH
-                ),
-                hashes.SHA256()
-            )
-            return True
-        except:
-            return False
+# Store connected peers
+connected_peers = {}
 
-    # Modified connect method to check and store keys
-    def connect_to_peer(self, peer_name=None, peer_ip=None, peer_port=None):
-        if peer_name:
-            print(f"Connecting to peer: {peer_name}")
-        elif peer_ip:
-            print(f"Connecting to peer at {peer_ip}:{peer_port}")
-        else:
-            print("Connecting to all discovered peers...")
+def connect_to_peer(peer_name=None, peer_ip=None, peer_port=None):
+    if peer_name:
+        print(f"Connecting to peer: {peer_name}")
+    elif peer_ip:
+        print(f"Connecting to peer at {peer_ip}:{peer_port}")
+    else:
+        print("Connecting to all discovered peers...")
 
-        # Check if peer already has keys stored
-        if peer_name in self.peers_keys:
-            rsa_private, rsa_public, dh_private, dh_public = self.peers_keys[peer_name]
-            print(f"Using stored keys for peer: {peer_name}")
-        else:
-            # Generate new keys if not already stored
-            rsa_private, rsa_public = self.generate_rsa_keys()
-            dh_private, dh_public = self.generate_dh_keys()
+    # Check if we already have this peer's keys saved
+    if peer_name in connected_peers:
+        print(f"Reusing keys for {peer_name}")
+        rsa_private, rsa_public, dh_private, dh_public = connected_peers[peer_name]
+    else:
+        # Generate RSA and DH keys for the connection
+        print("Generating new keys...")
+        rsa_private, rsa_public = generate_rsa_keys()
+        dh_private, dh_public = generate_dh_keys()
 
-            # Store keys for future connections
-            self.peers_keys[peer_name] = (rsa_private, rsa_public, dh_private, dh_public)
+        # Store keys under the peer's name
+        connected_peers[peer_name] = (rsa_private, rsa_public, dh_private, dh_public)
 
-            # Display RSA keys
-            print("\nGenerating RSA keys...")
-            print(f"RSA Public Key: {rsa_public.public_bytes(encoding=serialization.Encoding.PEM, format=serialization.PublicFormat.SubjectPublicKeyInfo)}")
-            print(f"RSA Private Key: {rsa_private.private_bytes(encoding=serialization.Encoding.PEM, format=serialization.PrivateFormat.PKCS8, encryption_algorithm=serialization.NoEncryption())}")
+    # Simulate sending and signing DH public key with RSA private key
+    message = dh_public.public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo
+    )
+    signature = sign_message(rsa_private, message)
 
-            # Display DH keys
-            print("\nGenerating DH keys...")
-            print(f"DH Public Key: {dh_public.public_bytes(encoding=serialization.Encoding.PEM, format=serialization.PublicFormat.SubjectPublicKeyInfo)}")
-            print(f"DH Private Key: {dh_private.private_bytes(encoding=serialization.Encoding.PEM, format=serialization.PrivateFormat.PKCS8, encryption_algorithm=serialization.NoEncryption())}")
+    print("\nSigned DH Public Key. Sending to peer...")
+    sys.stdout.flush()
 
-        # Simulate sending and signing DH public key with RSA private key
-        message = dh_public.public_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PublicFormat.SubjectPublicKeyInfo
-        )
-        signature = self.sign_message(rsa_private, message)
+    # Simulate receiving and verifying the peer's key
+    print("\n[Feature 2] Secure connection established.\n")
 
-        print("\nSigned DH Public Key. Sending to peer...")
+    # Send verification of received public key
+    print(f"Verification message sent: Received peer's public key: {dh_public.public_bytes(encoding=serialization.Encoding.PEM, format=serialization.PublicFormat.SubjectPublicKeyInfo)}")
 
-        # Here we simulate receiving and verifying the peer's key
-        print("\n[Feature 2] Secure connection established.\n")
+    # Simulate receiving a peer verification message back
+    print(f"Received peer's verification message: Received {dh_public.public_bytes(encoding=serialization.Encoding.PEM, format=serialization.PublicFormat.SubjectPublicKeyInfo)}")
+    sys.stdout.flush()
 
-        # Send verification of received public key
-        print(f"Verification message sent: Received peer's public key: {dh_public.public_bytes(encoding=serialization.Encoding.PEM, format=serialization.PublicFormat.SubjectPublicKeyInfo)}")
+def list_contacts():
+    if not connected_peers:
+        print("No connected peers.")
+        return
 
-        # Simulate receiving a peer verification message back
-        print(f"Received peer's verification message: Received {dh_public.public_bytes(encoding=serialization.Encoding.PEM, format=serialization.PublicFormat.SubjectPublicKeyInfo)}")
-        sys.stdout.flush()
+    print("\nListing connected peers:")
+    for peer_name, (rsa_private, rsa_public, dh_private, dh_public) in connected_peers.items():
+        peer_ip = "Unknown"  # In a real implementation, this would be the peer's actual IP address
+        peer_port = "Unknown"  # In a real implementation, this would be the peer's actual port
+        print(f"Peer Name: {peer_name}")
+        print(f"  IP: {peer_ip}, Port: {peer_port}")
+        print(f"  RSA Public Key: {rsa_public.public_bytes(encoding=serialization.Encoding.PEM, format=serialization.PublicFormat.SubjectPublicKeyInfo)}")
+        print(f"  DH Public Key: {dh_public.public_bytes(encoding=serialization.Encoding.PEM, format=serialization.PublicFormat.SubjectPublicKeyInfo)}")
+        print()
 
 def main():
     print("P2P Secure File Sharing Application\n")
     show_help()
-    
+
     peer_name = input("Enter your peer name: ").strip()
     peer_port = 5000
     discovery = PeerDiscovery(peer_name, peer_port)
     discovery.register_peer()
-    
+
     peer_queue = queue.Queue()
     listener = PeerListener(peer_queue)
-    
-    # Initialize the PeerConnection object to manage keys
-    peer_connection = PeerConnection()
 
     try:
         while True:
             time.sleep(5)
             command = input("\nEnter command: ").strip().lower()
-            
+
             if command == "discover":
                 print("Discovering peers...\n")
                 sys.stdout.flush()
                 discover_peers(peer_queue)
-            
+
             elif command.startswith("connect"):
                 parts = command.split()
                 if len(parts) == 2:
                     # Try to connect to a specific peer by name or address
                     if ':' in parts[1]:  # e.g., connect 192.168.40.5:5000
                         peer_ip, peer_port = parts[1].split(':')
-                        peer_connection.connect_to_peer(peer_ip=peer_ip, peer_port=int(peer_port))
+                        connect_to_peer(peer_ip=peer_ip, peer_port=int(peer_port))
                     else:  # e.g., connect peer_name
-                        peer_connection.connect_to_peer(peer_name=parts[1])
+                        connect_to_peer(peer_name=parts[1])
                 else:
                     # Connect to all peers
-                    peer_connection.connect_to_peer()
-            
+                    connect_to_peer()
+
             elif command == "contacts":
-                print("[Feature 3] Checking authenticated contacts...\n")
-                sys.stdout.flush()
-            
+                list_contacts()
+
             elif command == "quit":
                 print("Exiting application.\n")
                 sys.stdout.flush()
                 discovery.unregister_peer()
                 sys.exit(0)
-            
+
             else:
                 print("Invalid command. Type 'help' for a list of commands.\n")
                 sys.stdout.flush()
+
     except KeyboardInterrupt:
         discovery.unregister_peer()
         sys.exit(0)
