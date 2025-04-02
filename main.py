@@ -5,6 +5,8 @@ import threading
 import time
 import queue
 import ssl
+import os
+import json
 from cryptography.hazmat.primitives.asymmetric import rsa, ec, padding  # Added padding here
 from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
@@ -18,6 +20,8 @@ Available commands:
     discover  - List available peers on the network
     connect   - Connect to a discovered peer
     contacts  - Check mutual authentication of contacts
+    listmyfiles - List files shared by you
+    listpeerfiles <peer_ip> - List files shared by a peer
     quit      - Exit the application
 """)
     sys.stdout.flush()
@@ -32,19 +36,9 @@ class PeerDiscovery:
         self.info = None
         self.ecdh_private, self.ecdh_public = generate_ecdh_keys()  # Generate ECDH keys here
 
-class PeerDiscovery:
-    SERVICE_TYPE = "_http._tcp.local."
-
-    def __init__(self, peer_name, port):
-        self.peer_name = peer_name
-        self.port = port
-        self.zeroconf = Zeroconf()
-        self.info = None
-        self.ecdh_private, self.ecdh_public = generate_ecdh_keys()  # Generate ECDH keys here
-
     def register_peer(self):
-        hostname = socket.gethostname()
-        local_ip = socket.gethostbyname(hostname)
+        # Hardcode the IP to localhost (127.0.0.1) for testing purposes
+        local_ip = "127.0.0.1"
         
         # Broadcast the ECDH public key during registration in PEM format
         ecdh_public_key_pem = self.ecdh_public.public_bytes(
@@ -60,7 +54,7 @@ class PeerDiscovery:
         self.info = ServiceInfo(
             self.SERVICE_TYPE,
             f"{self.peer_name}.{self.SERVICE_TYPE}",
-            addresses=[socket.inet_aton(local_ip)],
+            addresses=[socket.inet_aton(local_ip)],  # Use the hardcoded IP
             port=self.port,
             properties={"publicKey": public_key}  # Store the cleaned-up public key
         )
@@ -83,40 +77,97 @@ class PeerListener:
         self.zeroconf = Zeroconf()
         self.browser = ServiceBrowser(self.zeroconf, PeerDiscovery.SERVICE_TYPE, self)
         self.peer_queue = peer_queue
+        self.peers = {}  # Store peer names as keys and IP/port as values
 
     def add_service(self, zeroconf, type, name):
         info = zeroconf.get_service_info(type, name)
         if info:
             ip = socket.inet_ntoa(info.addresses[0])
-            peer_info = f"Discovered peer: {name} - {ip}:{info.port}\n"
+            port = info.port  # Grab the peer's actual port
+            peer_name = name.split('.')[0]  # Extract the peer's name from the service name
+            self.peers[peer_name] = (ip, port)  # Store peer name as key, and (IP, port) as value
+
+            peer_info = f"Discovered peer: {peer_name} - {ip}:{port}\n"
             
             # Try to get the public key from the properties
             public_key_pem = info.properties.get(b"publicKey")
-
             if public_key_pem:
-                public_key = public_key_pem.decode()  # Decode the PEM encoded public key
-                public_key = public_key.replace("-----BEGIN PUBLIC KEY-----", "").replace("-----END PUBLIC KEY-----", "").replace("\n", "")
+                public_key = public_key_pem.decode().replace("-----BEGIN PUBLIC KEY-----", "").replace("-----END PUBLIC KEY-----", "").replace("\n", "")
                 peer_info += f"  Public ECDH Key: {public_key}\n\n"
             
             self.peer_queue.put(peer_info)
             print(peer_info, end="")
-            sys.stdout.flush()
 
     def remove_service(self, zeroconf, type, name):
-        peer_info = f"Peer {name} left the network.\n"
+        peer_name = name.split('.')[0]
+        if peer_name in self.peers:
+            del self.peers[peer_name]  # Remove peer by name
+            
+        peer_info = f"Peer {peer_name} left the network.\n"
         self.peer_queue.put(peer_info)
         print(peer_info, end="")
-        sys.stdout.flush()
 
     def update_service(self, zeroconf, type, name):
         pass
 
-def discover_peers(peer_queue):
-    while not peer_queue.empty():
-        print(peer_queue.get(), end="")
-    sys.stdout.flush()
+def handle_client(self, client_socket, client_address):
+    """Listen for incoming requests from peers."""
+    try:
+        data = client_socket.recv(4096).decode()
+        if data == "Get Peer File List":
+            # List the files in the shared folder and send them to the peer
+            files = os.listdir(self.shared_folder)
+            if files:
+                file_list = "\n".join(files)
+            else:
+                file_list = "No shared files available."
+            client_socket.sendall(file_list.encode())
+        
+        elif data.startswith("Request File:"):
+            # Extract the requested filename
+            filename = data.split(":", 1)[1]
+            if os.path.exists(filename):
+                client_socket.send(b"EXISTS "+str(os.path.getsize(filename)).encode('utf-8'))
+                with open(filename, 'rb') as f:
+                    bytes_read = f.read(1024)
+                    while bytes_read:
+                        client_socket.send(bytes_read)
+                        bytes_read = f.read(1024)
+                print(f"Sent: {filename}")
+            else:
+                client_socket.send(b"ERR")
+        
+        else:
+            client_socket.sendall(b"Unknown request")
+    except Exception as e:
+        print(f"Error: {e}")
+    finally:
+        client_socket.close()
 
-    # Generate RSA Keys
+def request_file(peer_ip, peer_port, filename):
+    """Request a specific file from a peer."""
+    with socket.create_connection((peer_ip, peer_port), timeout=5) as s:
+        # Send the request to the peer for a specific file
+        s.sendall(f"Request File:{filename}".encode())
+        
+        response = s.recv(1024).decode()
+        if response.startswith("EXISTS"):
+            filesize = int(response.split()[1])
+            print(f"File exists, size: {filesize} bytes")
+            with open(f"{os.getcwd()}\\{filename}", 'wb') as f:
+                bytes_received = 0
+                while bytes_received < filesize:
+                    bytes_read = s.recv(1024)
+                    if not bytes_read:
+                        break
+                    f.write(bytes_read)
+                    bytes_received += len(bytes_read)
+            print(f"Downloaded: {filename}")
+        else:
+            print(f"File {filename} does not exist on the peer.")
+
+
+# Generate RSA Keys
 def generate_rsa_keys():
     private_key = rsa.generate_private_key(
         public_exponent=65537,
@@ -130,98 +181,61 @@ def generate_ecdh_keys():
     public_key = private_key.public_key()
     return private_key, public_key
 
-# Simulate the signing process (using RSA for signatures)
-def sign_message(private_key, message):
-    signature = private_key.sign(
-        message,
-        padding.PSS(
-            mgf=padding.MGF1(hashes.SHA256()),
-            salt_length=padding.PSS.MAX_LENGTH
-        ),
-        hashes.SHA256()
-    )
-    return signature
-
-# Verify signature
-def verify_signature(public_key, message, signature):
-    try:
-        public_key.verify(
-            signature,
-            message,
-            padding.PSS(
-                mgf=padding.MGF1(hashes.SHA256()),
-                salt_length=padding.PSS.MAX_LENGTH
-            ),
-            hashes.SHA256()
-        )
-        return True
-    except:
-        return False
-
-# Store connected peers
-connected_peers = {}
-
-def connect_to_peer(peer_name=None, peer_ip=None, peer_port=None):
-    if peer_name:
-        print(f"Connecting to peer: {peer_name}")
-    elif peer_ip:
-        print(f"Connecting to peer at {peer_ip}:{peer_port}")
-    else:
-        print("Connecting to all discovered peers...")
-
-    # Check if we already have this peer's keys saved
-    if peer_name in connected_peers:
-        print(f"Reusing keys for {peer_name}")
-        rsa_private, rsa_public, ecdh_private, ecdh_public = connected_peers[peer_name]
-    else:
-        # Generate RSA keys and ECDH keys for the connection
-        print("Generating new keys...")
-        rsa_private, rsa_public = generate_rsa_keys()
-        ecdh_private, ecdh_public = generate_ecdh_keys()
-
-        # Store keys under the peer's name
-        connected_peers[peer_name] = (rsa_private, rsa_public, ecdh_private, ecdh_public)
-
-    # Simulate sending and signing ECDH public key with RSA private key
-    message = ecdh_public.public_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PublicFormat.SubjectPublicKeyInfo
-    )
-    signature = sign_message(rsa_private, message)
-
-    print("\nSigned ECDH Public Key. Sending to peer...")
+def discover_peers(peer_queue):
+    while not peer_queue.empty():
+        print(peer_queue.get(), end="")
     sys.stdout.flush()
 
-    # Simulate receiving and verifying the peer's key
-    print("\n[Feature 2] Secure connection established.\n")
-
-    # Send verification of received public key
-    print(f"Verification message sent: Received peer's public key: {ecdh_public.public_bytes(encoding=serialization.Encoding.PEM, format=serialization.PublicFormat.SubjectPublicKeyInfo)}")
-
-    # Simulate receiving a peer verification message back
-    print(f"Received peer's verification message: Received {ecdh_public.public_bytes(encoding=serialization.Encoding.PEM, format=serialization.PublicFormat.SubjectPublicKeyInfo)}")
+def discover_peers(peer_queue):
+    while not peer_queue.empty():
+        print(peer_queue.get(), end="")
     sys.stdout.flush()
 
-def list_contacts():
-    if not connected_peers:
-        print("No connected peers.")
+def listmyfiles():
+    shared_dir = "shared_files"
+    if not os.path.exists(shared_dir):
+        os.makedirs(shared_dir)
+    files = os.listdir(shared_dir)
+    if files:
+        print("Available shared files:")
+        for file in files:
+            print(f"  - {file}")
+    else:
+        print("No files available for sharing.")
+    sys.stdout.flush()
+
+def listpeerfiles(peer_name, listener):
+    """Request the file list from a peer by its name."""
+    # Check if the peer name exists in the discovered peers
+    if peer_name not in listener.peers:
+        print(f"Error: Peer {peer_name} not found in discovered peers.")
         return
 
-    print("\nListing connected peers:")
-    for peer_name, (rsa_private, rsa_public, ecdh_private, ecdh_public) in connected_peers.items():
-        peer_ip = "Unknown"  # In a real implementation, this would be the peer's actual IP address
-        peer_port = "Unknown"  # In a real implementation, this would be the peer's actual port
-        print(f"Peer Name: {peer_name}")
-        print(f"  IP: {peer_ip}, Port: {peer_port}")
-        print(f"  RSA Public Key: {rsa_public.public_bytes(encoding=serialization.Encoding.PEM, format=serialization.PublicFormat.SubjectPublicKeyInfo)}")
-        print(f"  ECDH Public Key: {ecdh_public.public_bytes(encoding=serialization.Encoding.PEM, format=serialization.PublicFormat.SubjectPublicKeyInfo)}")
-        print()
+    # Get the IP and port of the peer
+    peer_ip, peer_port = listener.peers[peer_name]
+    print(f"\nContacting peer {peer_name} at {peer_ip}:{peer_port} to list files...")
+
+    try:
+        with socket.create_connection((peer_ip, peer_port), timeout=5) as s:
+            s.sendall(b"Get Peer File List")  # Request file list
+            data = s.recv(4096).decode()
+            if data:
+                print(f"Files available from {peer_name} ({peer_ip}:{peer_port}):")
+                print(data)
+            else:
+                print(f"Peer {peer_name} ({peer_ip}:{peer_port}) has no shared files.")
+    except ConnectionRefusedError:
+        print(f"Error: Unable to connect to peer {peer_name} ({peer_ip}:{peer_port}). Connection refused.")
+    except socket.timeout:
+        print(f"Error: Connection to peer {peer_name} ({peer_ip}:{peer_port}) timed out.")
+    except Exception as e:
+        print(f"Error retrieving file list from peer {peer_name} ({peer_ip}:{peer_port}): {e}")
 
 def main():
     print("P2P Secure File Sharing Application\n")
     show_help()
 
-    peer_name = input("Enter your peer name: ").strip()
+    peer_name = input("Enter your name for discovery: ").strip()
     peer_port = 5000
     discovery = PeerDiscovery(peer_name, peer_port)
     discovery.register_peer()
@@ -232,28 +246,27 @@ def main():
     try:
         while True:
             time.sleep(7)
-            command = input("\nEnter command: ").strip().lower()
-
+            command = input("\nEnter command: ").strip()
             if command == "discover":
                 print("Discovering peers...\n")
                 sys.stdout.flush()
                 discover_peers(peer_queue)
 
             elif command.startswith("connect"):
-                parts = command.split()
-                if len(parts) == 2:
-                    # Try to connect to a specific peer by name or address
-                    if ':' in parts[1]:  # e.g., connect 192.168.40.5:5000
-                        peer_ip, peer_port = parts[1].split(':')
-                        connect_to_peer(peer_ip=peer_ip, peer_port=int(peer_port))
-                    else:  # e.g., connect peer_name
-                        connect_to_peer(peer_name=parts[1])
-                else:
-                    # Connect to all peers
-                    connect_to_peer()
+                pass  # Placeholder for actual connection logic
 
             elif command == "contacts":
-                list_contacts()
+                pass  # Placeholder for authentication logic
+
+            elif command == "listmyfiles":
+                listmyfiles()
+
+            elif command.startswith("listpeerfiles"):
+                parts = command.split()
+                if len(parts) < 2:
+                    print("Usage: listpeerfiles <peer_ip>")
+                else:
+                    listpeerfiles(parts[1], listener)
 
             elif command == "quit":
                 print("Exiting application.\n")
