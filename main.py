@@ -110,63 +110,6 @@ class PeerListener:
     def update_service(self, zeroconf, type, name):
         pass
 
-def handle_client(self, client_socket, client_address):
-    """Listen for incoming requests from peers."""
-    try:
-        data = client_socket.recv(4096).decode()
-        if data == "Get Peer File List":
-            # List the files in the shared folder and send them to the peer
-            files = os.listdir(self.shared_folder)
-            if files:
-                file_list = "\n".join(files)
-            else:
-                file_list = "No shared files available."
-            client_socket.sendall(file_list.encode())
-        
-        elif data.startswith("Request File:"):
-            # Extract the requested filename
-            filename = data.split(":", 1)[1]
-            if os.path.exists(filename):
-                client_socket.send(b"EXISTS "+str(os.path.getsize(filename)).encode('utf-8'))
-                with open(filename, 'rb') as f:
-                    bytes_read = f.read(1024)
-                    while bytes_read:
-                        client_socket.send(bytes_read)
-                        bytes_read = f.read(1024)
-                print(f"Sent: {filename}")
-            else:
-                client_socket.send(b"ERR")
-        
-        else:
-            client_socket.sendall(b"Unknown request")
-    except Exception as e:
-        print(f"Error: {e}")
-    finally:
-        client_socket.close()
-
-def request_file(peer_ip, peer_port, filename):
-    """Request a specific file from a peer."""
-    with socket.create_connection((peer_ip, peer_port), timeout=5) as s:
-        # Send the request to the peer for a specific file
-        s.sendall(f"Request File:{filename}".encode())
-        
-        response = s.recv(1024).decode()
-        if response.startswith("EXISTS"):
-            filesize = int(response.split()[1])
-            print(f"File exists, size: {filesize} bytes")
-            with open(f"{os.getcwd()}\\{filename}", 'wb') as f:
-                bytes_received = 0
-                while bytes_received < filesize:
-                    bytes_read = s.recv(1024)
-                    if not bytes_read:
-                        break
-                    f.write(bytes_read)
-                    bytes_received += len(bytes_read)
-            print(f"Downloaded: {filename}")
-        else:
-            print(f"File {filename} does not exist on the peer.")
-
-
 # Generate RSA Keys
 def generate_rsa_keys():
     private_key = rsa.generate_private_key(
@@ -186,50 +129,23 @@ def discover_peers(peer_queue):
         print(peer_queue.get(), end="")
     sys.stdout.flush()
 
-def discover_peers(peer_queue):
-    while not peer_queue.empty():
-        print(peer_queue.get(), end="")
-    sys.stdout.flush()
+def list_my_files():
+    # Use the script's directory as the base path
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    shared_folder = os.path.join(script_dir, "shared_files")  # Define the shared_files folder path
 
-def listmyfiles():
-    shared_dir = "shared_files"
-    if not os.path.exists(shared_dir):
-        os.makedirs(shared_dir)
-    files = os.listdir(shared_dir)
-    if files:
-        print("Available shared files:")
-        for file in files:
-            print(f"  - {file}")
-    else:
-        print("No files available for sharing.")
-    sys.stdout.flush()
-
-def listpeerfiles(peer_name, listener):
-    """Request the file list from a peer by its name."""
-    # Check if the peer name exists in the discovered peers
-    if peer_name not in listener.peers:
-        print(f"Error: Peer {peer_name} not found in discovered peers.")
+    if not os.path.exists(shared_folder):
+        print("No shared_files folder found. Please create one and add files to share.\n")
         return
 
-    # Get the IP and port of the peer
-    peer_ip, peer_port = listener.peers[peer_name]
-    print(f"\nContacting peer {peer_name} at {peer_ip}:{peer_port} to list files...")
-
-    try:
-        with socket.create_connection((peer_ip, peer_port), timeout=5) as s:
-            s.sendall(b"Get Peer File List")  # Request file list
-            data = s.recv(4096).decode()
-            if data:
-                print(f"Files available from {peer_name} ({peer_ip}:{peer_port}):")
-                print(data)
-            else:
-                print(f"Peer {peer_name} ({peer_ip}:{peer_port}) has no shared files.")
-    except ConnectionRefusedError:
-        print(f"Error: Unable to connect to peer {peer_name} ({peer_ip}:{peer_port}). Connection refused.")
-    except socket.timeout:
-        print(f"Error: Connection to peer {peer_name} ({peer_ip}:{peer_port}) timed out.")
-    except Exception as e:
-        print(f"Error retrieving file list from peer {peer_name} ({peer_ip}:{peer_port}): {e}")
+    files = os.listdir(shared_folder)  # List all files in the shared_files folder
+    if not files:
+        print("No files available for sharing in the shared_files folder.\n")
+    else:
+        print("Files available for sharing:")
+        for file in files:
+            print(f"  - {file}")
+    sys.stdout.flush()
 
 def main():
     print("P2P Secure File Sharing Application\n")
@@ -259,14 +175,10 @@ def main():
                 pass  # Placeholder for authentication logic
 
             elif command == "listmyfiles":
-                listmyfiles()
+                list_my_files()  # Call the list_my_files function
 
-            elif command.startswith("listpeerfiles"):
-                parts = command.split()
-                if len(parts) < 2:
-                    print("Usage: listpeerfiles <peer_ip>")
-                else:
-                    listpeerfiles(parts[1], listener)
+            elif command == "listpeerfiles":
+                pass  # Placeholder for listing peer files
 
             elif command == "quit":
                 print("Exiting application.\n")
