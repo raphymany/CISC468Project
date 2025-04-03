@@ -179,7 +179,7 @@ class SocketServer:
                 menu = (
                     "=== Server Menu ===\n"
                     "1. List Files\n"
-                    "2. Download Files\n"
+                    "2. Download File\n"
                     "3. Disconnect\n"
                     "Choose an option: "
                 )
@@ -219,7 +219,7 @@ class SocketServer:
                     client_socket.send(file_list.encode('utf-8'))
 
                 elif data == "2":
-                    # Handle file download
+                    # Handle single file download
                     shared_dir = "shared_files"
                     if not os.path.exists(shared_dir):
                         os.makedirs(shared_dir)
@@ -232,7 +232,7 @@ class SocketServer:
                             file_path = os.path.join(shared_dir, file)
                             file_size = os.path.getsize(file_path)  # Get file size
                             file_list += f"  - {file} ({file_size} bytes)\n"
-                        file_list += "Enter the file name(s) to download (comma-separated) or 'all' to download all files: "
+                        file_list += "Enter the file name to download: "
                     else:
                         file_list = "No files are currently being shared.\n"
 
@@ -240,29 +240,23 @@ class SocketServer:
 
                     # Receive the client's file request
                     try:
-                        requested_files = client_socket.recv(1024).decode('utf-8').strip()
-                        print(f"Client requested: {requested_files}")
+                        requested_file = client_socket.recv(1024).decode('utf-8').strip()
+                        print(f"Client requested: {requested_file}")
                         sys.stdout.flush()
                     except ConnectionResetError:
                         print("Client disconnected before sending file request.")
                         sys.stdout.flush()
                         break
 
-                    if requested_files.lower() == "all":
-                        # Send all files
-                        for file in files:
-                            self.send_file(client_socket, os.path.join(shared_dir, file))
-                        client_socket.send(b"END_OF_DOWNLOADS")  # Signal end of downloads
+                    if requested_file in files:
+                        self.send_file(client_socket, os.path.join(shared_dir, requested_file))
                     else:
-                        # Send specific files
-                        requested_files = [f.strip() for f in requested_files.split(",")]
-                        for file in requested_files:
-                            if file in files:
-                                self.send_file(client_socket, os.path.join(shared_dir, file))
-                            else:
-                                error_message = f"File '{file}' not found.\n"
-                                client_socket.send(error_message.encode('utf-8'))
-                        client_socket.send(b"END_OF_DOWNLOADS")  # Signal end of downloads
+                        error_message = f"File '{requested_file}' not found.\n"
+                        client_socket.send(error_message.encode('utf-8'))
+
+                    # Send the END_OF_DOWNLOADS signal after all files are sent
+                    time.sleep(3)  # Ensure the client is ready to receive the signal
+                    client_socket.sendall(b"END_OF_DOWNLOADS")
 
                 elif data == "3":
                     # Disconnect the client
@@ -293,7 +287,6 @@ class SocketServer:
                 client_socket.send(f"START {file_name} {file_size}".encode('utf-8'))
                 while chunk := f.read(1024):
                     client_socket.send(chunk)
-                client_socket.send(b"END")  # Notify client of file end
             print(f"File '{file_name}' sent successfully.")
             sys.stdout.flush()
         except Exception as e:
@@ -345,8 +338,6 @@ def connect_to_peer(peer_ip, peer_port):
                             received_size = 0
                             while received_size < file_size:
                                 chunk = client_socket.recv(1024)
-                                if chunk == b"END":
-                                    break
                                 f.write(chunk)
                                 received_size += len(chunk)
                             print(f"File '{file_name}' received successfully.")
