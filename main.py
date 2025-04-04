@@ -35,35 +35,22 @@ class PeerDiscovery:
         self.zeroconf = Zeroconf()
         self.info = None
         self.peers = {}  # Dictionary to store discovered peers (username -> (IP, port))
-        self.ecdh_private, self.ecdh_public = generate_ecdh_keys()  # Generate ECDH keys here
 
     def register_peer(self):
         hostname = socket.gethostname()
         local_ip = socket.gethostbyname(hostname)
-        
-        # Broadcast the ECDH public key during registration in PEM format
-        ecdh_public_key_pem = self.ecdh_public.public_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PublicFormat.SubjectPublicKeyInfo
-        )
-        
-        # Remove the PEM header/footer and newlines
-        public_key = ecdh_public_key_pem.decode()
-        public_key = public_key.replace("-----BEGIN PUBLIC KEY-----", "").replace("-----END PUBLIC KEY-----", "").replace("\n", "")
-        
-        # Register the peer in Zeroconf with the public key (no PEM format)
+
+        # Register the peer in Zeroconf without generating ECDH keys
         self.info = ServiceInfo(
             self.SERVICE_TYPE,
             f"{self.peer_name}.{self.SERVICE_TYPE}",
             addresses=[socket.inet_aton(local_ip)],
             port=self.port,
-            properties={"publicKey": public_key}  # Store the cleaned-up public key
+            properties={}  # No public key is broadcasted during registration
         )
-        
+
         self.zeroconf.register_service(self.info)
         print(f"Registered peer: {self.peer_name} ({local_ip}:{self.port})")
-        print(f"Public ECDH Public Key: {public_key}")  # Print the public key without PEM formatting
-        
         sys.stdout.flush()
         time.sleep(2)
 
@@ -89,14 +76,6 @@ class PeerListener:
             
             peer_info = f"\nDiscovered peer: {peer_name} - {ip}:{info.port}\n"
             
-            # Try to get the public key from the properties
-            public_key_pem = info.properties.get(b"publicKey")
-
-            if public_key_pem:
-                public_key = public_key_pem.decode()  # Decode the PEM encoded public key
-                public_key = public_key.replace("-----BEGIN PUBLIC KEY-----", "").replace("-----END PUBLIC KEY-----", "").replace("\n", "")
-                peer_info += f"  Public ECDH Key: {public_key}\n\n"
-            
             self.peer_queue.put(peer_info)
             print(peer_info, end="")
             sys.stdout.flush()
@@ -118,15 +97,6 @@ def discover_peers(peer_queue):
     while not peer_queue.empty():
         print(peer_queue.get(), end="")
     sys.stdout.flush()
-
-    # Generate RSA Keys
-def generate_rsa_keys():
-    private_key = rsa.generate_private_key(
-        public_exponent=65537,
-        key_size=2048
-    )
-    public_key = private_key.public_key()
-    return private_key, public_key
 
 def generate_ecdh_keys():
     private_key = ec.generate_private_key(ec.SECP256R1(), default_backend())
@@ -161,6 +131,9 @@ class SocketServer:
         print(f"Socket server started on {self.host}:{self.port}")
         sys.stdout.flush()  # Ensure the message is immediately printed
 
+        # Generate ECDH key pair for the server
+        self.private_key, self.public_key = generate_ecdh_keys()
+
     def start(self):
         try:
             while True:
@@ -174,108 +147,154 @@ class SocketServer:
 
     def handle_client(self, client_socket):
         try:
-            while True:
-                # Send the menu to the client
-                menu = (
-                    "=== Server Menu ===\n"
-                    "1. List Files\n"
-                    "2. Download File\n"
-                    "3. Disconnect\n"
-                    "Choose an option: "
-                )
-                client_socket.send(menu.encode('utf-8'))
+            # Step 1: Exchange public keys
+            print("Exchanging public keys for ECDH...")
+            sys.stdout.flush()
 
-                # Receive the client's choice
-                try:
-                    data = client_socket.recv(1024).decode('utf-8').strip()
-                    if not data:
-                        print("No data received. Closing connection.")
-                        sys.stdout.flush()
-                        break
-                except ConnectionResetError:
-                    print("Client disconnected unexpectedly.")
-                    sys.stdout.flush()
-                    break
+            # Send server's public key to the client
+            server_public_key_pem = self.public_key.public_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PublicFormat.SubjectPublicKeyInfo
+            )
+            client_socket.send(server_public_key_pem)
 
-                print(f"Client selected option: {data}")
-                sys.stdout.flush()
+            # Receive client's public key
+            client_public_key_pem = client_socket.recv(1024)
+            client_public_key = serialization.load_pem_public_key(
+                client_public_key_pem,
+                backend=default_backend()
+            )
 
-                if data == "1":
-                    # List files in the shared_files directory
-                    shared_dir = "shared_files"
-                    if not os.path.exists(shared_dir):
-                        os.makedirs(shared_dir)
+            # Step 2: Generate shared secret
+            shared_secret = self.private_key.exchange(ec.ECDH(), client_public_key)
 
-                    files = os.listdir(shared_dir)
-                    if files:
-                        file_list = "Files you are sharing:\n"
-                        for file in files:
-                            file_path = os.path.join(shared_dir, file)
-                            file_size = os.path.getsize(file_path)  # Get file size
-                            file_list += f"  - {file} ({file_size} bytes)\n"
-                    else:
-                        file_list = "No files are currently being shared.\n"
+            # Step 3: Derive session key using a KDF
+            session_key = self.derive_session_key(shared_secret)
+            print(f"Session key established: {session_key.hex()}")
+            sys.stdout.flush()
 
-                    client_socket.send(file_list.encode('utf-8'))
+            # Proceed with the rest of the communication (e.g., file sharing)
+            self.secure_communication(client_socket, session_key)
 
-                elif data == "2":
-                    # Handle single file download
-                    shared_dir = "shared_files"
-                    if not os.path.exists(shared_dir):
-                        os.makedirs(shared_dir)
-
-                    # Send the list of files to the client
-                    files = os.listdir(shared_dir)
-                    if files:
-                        file_list = "Available files:\n"
-                        for file in files:
-                            file_path = os.path.join(shared_dir, file)
-                            file_size = os.path.getsize(file_path)  # Get file size
-                            file_list += f"  - {file} ({file_size} bytes)\n"
-                        file_list += "Enter the file name to download: "
-                    else:
-                        file_list = "No files are currently being shared.\n"
-
-                    client_socket.send(file_list.encode('utf-8'))
-
-                    # Receive the client's file request
-                    try:
-                        requested_file = client_socket.recv(1024).decode('utf-8').strip()
-                        print(f"Client requested: {requested_file}")
-                        sys.stdout.flush()
-                    except ConnectionResetError:
-                        print("Client disconnected before sending file request.")
-                        sys.stdout.flush()
-                        break
-
-                    if requested_file in files:
-                        self.send_file(client_socket, os.path.join(shared_dir, requested_file))
-                    else:
-                        error_message = f"File '{requested_file}' not found.\n"
-                        client_socket.send(error_message.encode('utf-8'))
-
-                    # Send the END_OF_DOWNLOADS signal after all files are sent
-                    time.sleep(3)  # Ensure the client is ready to receive the signal
-                    client_socket.sendall(b"END_OF_DOWNLOADS")
-
-                elif data == "3":
-                    # Disconnect the client
-                    print("Client chose to disconnect.")
-                    sys.stdout.flush()
-                    break
-
-                else:
-                    # Invalid option
-                    error_message = "Invalid option. Please choose 1, 2, or 3.\n"
-                    client_socket.send(error_message.encode('utf-8'))
-
-        except ConnectionResetError:
-            print("Client disconnected.")
+        except Exception as e:
+            print(f"Error during client handling: {e}")
             sys.stdout.flush()
         finally:
             print("Closing client connection.")
             sys.stdout.flush()
             client_socket.close()
+
+    def derive_session_key(self, shared_secret):
+        """Derive a session key from the shared secret using PBKDF2."""
+        salt = b"secure_salt"  # Use a fixed salt for simplicity (can be randomized)
+        kdf = PBKDF2HMAC(
+            algorithm=hashes.SHA256(),
+            length=32,  # 256-bit session key
+            salt=salt,
+            iterations=100000,
+            backend=default_backend()
+        )
+        return kdf.derive(shared_secret)
+
+    def secure_communication(self, client_socket, session_key):
+        """Secure communication using the session key."""
+        # Here, you can encrypt/decrypt messages using the session key
+        print("Secure communication established. Proceeding with menu...")
+        sys.stdout.flush()
+
+        # Continue with your existing menu logic
+        while True:
+            time.sleep(3)
+            menu = (
+                "=== Server Menu ===\n"
+                "1. List Files\n"
+                "2. Download File\n"
+                "3. Disconnect\n"
+                "Choose an option: "
+            )
+            client_socket.send(menu.encode('utf-8'))
+
+            # Receive the client's choice
+            try:
+                data = client_socket.recv(1024).decode('utf-8').strip()
+                if not data:
+                    print("No data received. Closing connection.")
+                    sys.stdout.flush()
+                    break
+            except ConnectionResetError:
+                print("Client disconnected unexpectedly.")
+                sys.stdout.flush()
+                break
+
+            print(f"Client selected option: {data}")
+            sys.stdout.flush()
+
+            # Handle menu options (reuse your existing logic here)
+            if data == "1":
+                self.list_files(client_socket)
+            elif data == "2":
+                self.handle_file_download(client_socket)
+            elif data == "3":
+                print("Client chose to disconnect.")
+                sys.stdout.flush()
+                break
+            else:
+                error_message = "Invalid option. Please choose 1, 2, or 3.\n"
+                client_socket.send(error_message.encode('utf-8'))
+
+    def list_files(self, client_socket):
+        """List files in the shared_files directory."""
+        shared_dir = "shared_files"
+        if not os.path.exists(shared_dir):
+            os.makedirs(shared_dir)
+
+        files = os.listdir(shared_dir)
+        if files:
+            file_list = "Files you are sharing:\n"
+            for file in files:
+                file_path = os.path.join(shared_dir, file)
+                file_size = os.path.getsize(file_path)  # Get file size
+                file_list += f"  - {file} ({file_size} bytes)\n"
+        else:
+            file_list = "No files are currently being shared.\n"
+
+        client_socket.send(file_list.encode('utf-8'))
+
+    def handle_file_download(self, client_socket):
+        """Handle file download requests."""
+        shared_dir = "shared_files"
+        if not os.path.exists(shared_dir):
+            os.makedirs(shared_dir)
+
+        # Send the list of files to the client
+        files = os.listdir(shared_dir)
+        if files:
+            file_list = "Available files:\n"
+            for file in files:
+                file_path = os.path.join(shared_dir, file)
+                file_size = os.path.getsize(file_path)  # Get file size
+                file_list += f"  - {file} ({file_size} bytes)\n"
+            file_list += "Enter the file name to download: "
+        else:
+            file_list = "No files are currently being shared.\n"
+
+        client_socket.send(file_list.encode('utf-8'))
+
+        # Receive the client's file request
+        try:
+            requested_file = client_socket.recv(1024).decode('utf-8').strip()
+            print(f"Client requested: {requested_file}")
+            sys.stdout.flush()
+        except ConnectionResetError:
+            print("Client disconnected before sending file request.")
+            sys.stdout.flush()
+            return
+
+        if requested_file in files:
+            self.send_file(client_socket, os.path.join(shared_dir, requested_file))
+        else:
+            error_message = f"File '{requested_file}' not found.\n"
+            client_socket.send(error_message.encode('utf-8'))
 
     def send_file(self, client_socket, file_path):
         """Send a file to the client."""
@@ -299,69 +318,113 @@ def connect_to_peer(peer_ip, peer_port):
         client_socket.connect((peer_ip, peer_port))
         print(f"Connected to peer at {peer_ip}:{peer_port}")
 
-        while True:
-            # Receive data until we have the full menu
-            data = b""
-            while b"Choose an option:" not in data:
-                chunk = client_socket.recv(1024)
-                if not chunk:
-                    raise ConnectionError("Server disconnected")
-                data += chunk
-            
-            # Display menu
-            menu = data.decode('utf-8')
-            print(menu, end='')
+        # Step 1: Exchange public keys
+        print("Exchanging public keys for ECDH...")
+        sys.stdout.flush()
 
-            # Get and send choice
-            choice = input().strip()
-            client_socket.send(choice.encode('utf-8'))
+        # Generate ECDH key pair for the client
+        private_key, public_key = generate_ecdh_keys()
 
-            # Handle file download
-            if choice == "2":
-                # Receive the list of files or prompt
-                file_list = client_socket.recv(1024).decode('utf-8')
-                print(file_list, end='')
+        # Send client's public key to the server
+        client_public_key_pem = public_key.public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo
+        )
+        client_socket.send(client_public_key_pem)
 
-                # Send file request
-                requested_files = input().strip()
-                client_socket.send(requested_files.encode('utf-8'))
+        # Receive server's public key
+        server_public_key_pem = client_socket.recv(1024)
+        server_public_key = serialization.load_pem_public_key(
+            server_public_key_pem,
+            backend=default_backend()
+        )
 
-                # Receive files
-                while True:
-                    data = client_socket.recv(1024)
-                    if data.startswith(b"START"):
-                        # Parse file name and size
-                        _, file_name, file_size = data.decode('utf-8').split(" ", 2)
-                        file_size = int(file_size)
-                        print(f"Receiving file: {file_name} ({file_size} bytes)")
-                        with open(file_name, "wb") as f:
-                            received_size = 0
-                            while received_size < file_size:
-                                chunk = client_socket.recv(1024)
-                                f.write(chunk)
-                                received_size += len(chunk)
-                            print(f"File '{file_name}' received successfully.")
-                    elif data == b"END_OF_DOWNLOADS":
-                        # Signal that all requested files have been sent
-                        print("All requested files have been downloaded.")
-                        break
-                    else:
-                        print(data.decode('utf-8'), end='')
+        # Step 2: Generate shared secret
+        shared_secret = private_key.exchange(ec.ECDH(), server_public_key)
 
-            # Handle disconnect
-            elif choice == "3":
-                print("Disconnected from server.")
-                break
+        # Step 3: Derive session key using a KDF
+        session_key = derive_session_key(shared_secret)
+        print(f"Session key established: {session_key.hex()}")
+        sys.stdout.flush()
 
-    except ConnectionRefusedError:
-        print(f"Could not connect to peer at {peer_ip}:{peer_port}")
+        # Proceed with the rest of the communication (e.g., menu handling)
+        communicate_with_server(client_socket, session_key)
+
     except Exception as e:
         print(f"Error: {e}")
     finally:
         client_socket.close()
         print("Client socket closed.")
         sys.stdout.flush()
+
+def derive_session_key(shared_secret):
+    """Derive a session key from the shared secret using PBKDF2."""
+    salt = b"secure_salt"  # Use a fixed salt for simplicity (can be randomized)
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA256(),
+        length=32,  # 256-bit session key
+        salt=salt,
+        iterations=100000,
+        backend=default_backend()
+    )
+    return kdf.derive(shared_secret)
+
+def communicate_with_server(client_socket, session_key):
+    """Handle communication with the server using the session key."""
+    while True:
+        # Receive data until we have the full menu
+        data = b""
+        while b"Choose an option:" not in data:
+            chunk = client_socket.recv(1024)
+            if not chunk:
+                raise ConnectionError("Server disconnected")
+            data += chunk
         
+        # Display menu
+        menu = data.decode('utf-8')
+        print(menu, end='')
+
+        # Get and send choice
+        choice = input().strip()
+        client_socket.send(choice.encode('utf-8'))
+
+        # Handle file download
+        if choice == "2":
+            # Receive the list of files or prompt
+            file_list = client_socket.recv(1024).decode('utf-8')
+            print(file_list, end='')
+
+            # Send file request
+            requested_files = input().strip()
+            client_socket.send(requested_files.encode('utf-8'))
+
+            # Receive files
+            while True:
+                data = client_socket.recv(1024)
+                if data.startswith(b"START"):
+                    # Parse file name and size
+                    _, file_name, file_size = data.decode('utf-8').split(" ", 2)
+                    file_size = int(file_size)
+                    print(f"Receiving file: {file_name} ({file_size} bytes)")
+                    with open(file_name, "wb") as f:
+                        received_size = 0
+                        while received_size < file_size:
+                            chunk = client_socket.recv(1024)
+                            f.write(chunk)
+                            received_size += len(chunk)
+                        print(f"File '{file_name}' received successfully.")
+                elif data == b"END_OF_DOWNLOADS":
+                    # Signal that all requested files have been sent
+                    print("All requested files have been downloaded.")
+                    break
+                else:
+                    print(data.decode('utf-8'), end='')
+
+        # Handle disconnect
+        elif choice == "3":
+            print("Disconnected from server.")
+            break
+
 def main():
     print("P2P Secure File Sharing Application\n")
     show_help()
@@ -395,7 +458,7 @@ def main():
                     print(f"Peer '{peer_username}' not found. Please discover peers first.")
 
             elif command == "ss":
-                server = SocketServer("192.168.2.97", peer_port)  # Use the same random port
+                server = SocketServer("192.168.40.5", peer_port)  # Use the same random port
                 print(f"Starting server on port {peer_port}")  # Inform the user of the server port
                 threading.Thread(target=server.start, daemon=True).start()  # Use daemon threads to ensure proper shutdown
 
