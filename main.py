@@ -198,18 +198,18 @@ class SocketServer:
 
     def secure_communication(self, client_socket, session_key):
         """Secure communication using the session key."""
-        # Here, you can encrypt/decrypt messages using the session key
         print("Secure communication established. Proceeding with menu...")
         sys.stdout.flush()
 
-        # Continue with your existing menu logic
         while True:
             time.sleep(3)
             menu = (
                 "=== Server Menu ===\n"
                 "1. List Files\n"
                 "2. Download File\n"
-                "3. Disconnect\n"
+                "3. Request File (with consent)\n"
+                "4. Send File (with consent)\n"
+                "5. Disconnect\n"
                 "Choose an option: "
             )
             client_socket.send(menu.encode('utf-8'))
@@ -229,17 +229,21 @@ class SocketServer:
             print(f"Client selected option: {data}")
             sys.stdout.flush()
 
-            # Handle menu options (reuse your existing logic here)
+            # Handle menu options
             if data == "1":
                 self.list_files(client_socket)
             elif data == "2":
                 self.handle_file_download(client_socket)
             elif data == "3":
+                self.handle_file_request_with_consent(client_socket)
+            elif data == "4":
+                self.handle_file_send_with_consent(client_socket)
+            elif data == "5":
                 print("Client chose to disconnect.")
                 sys.stdout.flush()
                 break
             else:
-                error_message = "Invalid option. Please choose 1, 2, or 3.\n"
+                error_message = "Invalid option. Please choose 1, 2, 3, 4, or 5.\n"
                 client_socket.send(error_message.encode('utf-8'))
 
     def list_files(self, client_socket):
@@ -306,11 +310,150 @@ class SocketServer:
                 client_socket.send(f"START {file_name} {file_size}".encode('utf-8'))
                 while chunk := f.read(1024):
                     client_socket.send(chunk)
+            # Notify client that the file transfer is complete
+            client_socket.send(b"END_OF_FILE")
             print(f"File '{file_name}' sent successfully.")
             sys.stdout.flush()
         except Exception as e:
             print(f"Error sending file '{file_path}': {e}")
             sys.stdout.flush()
+
+    def handle_file_request_with_consent(self, client_socket):
+        """Handle a file request from the client with consent."""
+        downloads = "downloads"
+        if not os.path.exists(downloads):
+            os.makedirs(downloads)
+
+        # Send the list of files to the client
+        files = os.listdir(downloads)
+        if files:
+            file_list = "Available files:\n"
+            for file in files:
+                file_path = os.path.join(downloads, file)
+                file_size = os.path.getsize(file_path)  # Get file size
+                file_list += f"  - {file} ({file_size} bytes)\n"
+            file_list += "Enter the file name to request: "
+        else:
+            file_list = "No files are currently being shared.\n"
+
+        client_socket.send(file_list.encode('utf-8'))
+
+        # Receive the client's file request
+        try:
+            requested_file = client_socket.recv(1024).decode('utf-8').strip()
+            print(f"Client requested: {requested_file}")
+            sys.stdout.flush()
+        except ConnectionResetError:
+            print("Client disconnected before sending file request.")
+            sys.stdout.flush()
+            return
+
+        if requested_file in files:
+            # Ask the server user for consent
+            print(f"Client requested '{requested_file}'. Allow? (yes/no): ", end="")
+            sys.stdout.flush()
+
+            # Wait for consent input
+            consent = input().strip().lower()
+            if consent == "yes":
+                self.send_file(client_socket, os.path.join(downloads, requested_file))
+            else:
+                client_socket.send(f"Request to download '{requested_file}' denied.\n".encode('utf-8'))
+        else:
+            error_message = f"File '{requested_file}' not found.\n"
+            client_socket.send(error_message.encode('utf-8'))
+
+    def handle_file_send_with_consent(self, client_socket):
+        """Handle sending a file to the client with consent."""
+        downloads_dir = "downloads"
+        if not os.path.exists(downloads_dir):
+            os.makedirs(downloads_dir)
+
+        # List files in the downloads directory
+        files = os.listdir(downloads_dir)
+        if files:
+            file_list = "Files available to send:\n"
+            for file in files:
+                file_path = os.path.join(downloads_dir, file)
+                file_size = os.path.getsize(file_path)  # Get file size
+                file_list += f"  - {file} ({file_size} bytes)\n"
+            file_list += "Enter the file name to send: "
+        else:
+            file_list = "No files are available to send.\n"
+
+        client_socket.send(file_list.encode('utf-8'))
+
+        # Receive the client's file choice
+        try:
+            selected_file = client_socket.recv(1024).decode('utf-8').strip()
+            print(f"Client wants to send: {selected_file}")
+            sys.stdout.flush()
+        except ConnectionResetError:
+            print("Client disconnected before sending file choice.")
+            sys.stdout.flush()
+            return
+
+        if selected_file in files:
+            # Ask the server user for consent
+            print(f"Do you accept the file '{selected_file}'? (yes/no): ", end="")
+            sys.stdout.flush()
+
+            # Flush any pending input before asking for consent
+            try:
+                import msvcrt  # For Windows
+                while msvcrt.kbhit():
+                    msvcrt.getch()
+            except ImportError:
+                try:
+                    import termios  # For Unix-based systems
+                    import tty
+                    termios.tcflush(sys.stdin, termios.TCIFLUSH)
+                except ImportError:
+                    pass  # If flushing is not supported, continue without it
+
+            # Wait for consent input
+            consent = input().strip().lower()
+            if consent == "yes":
+                client_socket.send(f"Consent granted for '{selected_file}'.".encode('utf-8'))
+
+                # Receive the START signal
+                start_msg = client_socket.recv(1024).decode('utf-8')
+                if not start_msg.startswith("START"):
+                    print("Invalid start message.")
+                    return
+
+                try:
+                    _, file_name, file_size = start_msg.split(" ", 2)
+                    file_size = int(file_size)
+                except ValueError:
+                    print("Malformed START message.")
+                    return
+
+                _, file_name, file_size = start_msg.split(" ", 2)
+                file_size = int(file_size)
+
+                # Save the file
+                file_path = os.path.join(".", file_name)
+                with open(file_path, "wb") as f:
+                    while True:
+                        chunk = client_socket.recv(1024)
+                        if b"END_OF_FILE" in chunk:
+                            # Cleanly strip out the marker
+                            chunk = chunk.replace(b"END_OF_FILE", b"")
+                            f.write(chunk)
+                            break
+                        f.write(chunk)
+                print(f"Received file '{file_name}' from client.")
+
+                # ONLY now do we attempt to receive the END_OF_FILE marker
+                end_marker = client_socket.recv(13)  # Length of b'END_OF_FILE'
+                if end_marker != b'END_OF_FILE':
+                    print(f"Warning: Expected END_OF_FILE but got: {end_marker}")
+            else:
+                client_socket.send(f"Request to send '{selected_file}' denied.\n".encode('utf-8'))
+        else:
+            error_message = f"File '{selected_file}' not found.\n"
+            client_socket.send(error_message.encode('utf-8'))
 
 def connect_to_peer(peer_ip, peer_port):
     try:
@@ -372,58 +515,101 @@ def derive_session_key(shared_secret):
 def communicate_with_server(client_socket, session_key):
     """Handle communication with the server using the session key."""
     while True:
-        # Receive data until we have the full menu
+        # Receive data until we have the full menu or a consent request
         data = b""
-        while b"Choose an option:" not in data:
+        while b"Choose an option:" not in data and b"(yes/no):" not in data:
             chunk = client_socket.recv(1024)
             if not chunk:
-                raise ConnectionError("Server disconnected")
+                print("Server disconnected.")
+                sys.stdout.flush()
+                return
             data += chunk
-        
-        # Display menu
+
+        # Decode the received data
         menu = data.decode('utf-8')
         print(menu, end='')
 
-        # Get and send choice
+        # Handle consent requests
+        if "(yes/no):" in menu:
+            # Consent request received
+            consent = input().strip().lower()  # Ask the user for consent
+            client_socket.send(consent.encode('utf-8'))  # Send the response to the server
+            continue  # Go back to waiting for the next server message
+
+        # Get and send choice for the main menu
         choice = input().strip()
         client_socket.send(choice.encode('utf-8'))
 
-        # Handle file download
-        if choice == "2":
+        # Handle file download (Option 2) and file request with consent (Option 3)
+        if choice in ["2", "3"]:
             # Receive the list of files or prompt
             file_list = client_socket.recv(1024).decode('utf-8')
             print(file_list, end='')
 
             # Send file request
-            requested_files = input().strip()
-            client_socket.send(requested_files.encode('utf-8'))
+            requested_file = input().strip()
+            client_socket.send(requested_file.encode('utf-8'))
 
             # Receive files
             while True:
                 data = client_socket.recv(1024)
                 if data.startswith(b"START"):
                     # Parse file name and size
-                    _, file_name, file_size = data.decode('utf-8').split(" ", 2)
-                    file_size = int(file_size)
-                    print(f"Receiving file: {file_name} ({file_size} bytes)")
-                    with open(file_name, "wb") as f:
-                        received_size = 0
-                        while received_size < file_size:
+                    _, file_name, _ = data.decode('utf-8').split(" ", 2)
+                    print(f"Receiving file: {file_name}")
+                    file_path = os.path.join(".", file_name)
+                    with open(file_path, "wb") as f:
+                        while True:
                             chunk = client_socket.recv(1024)
+                            if b"END_OF_FILE" in chunk:
+                                chunk = chunk.replace(b"END_OF_FILE", b"")
+                                f.write(chunk)
+                                break
                             f.write(chunk)
-                            received_size += len(chunk)
-                        print(f"File '{file_name}' received successfully.")
+                    print(f"File '{file_name}' received successfully.")
                 elif data == b"END_OF_DOWNLOADS":
-                    # Signal that all requested files have been sent
                     print("All requested files have been downloaded.")
                     break
                 else:
                     print(data.decode('utf-8'), end='')
 
-        # Handle disconnect
-        elif choice == "3":
+            # Exit the loop and return to the main menu
+            print("\nReturning to the main menu...")
+
+        # Handle file send with consent (Option 4)
+        elif choice == "4":
+            file_list = client_socket.recv(1024).decode('utf-8')
+            print(file_list, end='')
+
+            selected_file = input().strip()
+            client_socket.send(selected_file.encode('utf-8'))
+
+            # Wait for consent response
+            consent_response = client_socket.recv(1024).decode('utf-8')
+            print(consent_response, end='')
+
+            if "Consent granted" in consent_response:
+                file_path = os.path.join("downloads", selected_file)
+                try:
+                    with open(file_path, "rb") as f:
+                        file_size = os.path.getsize(file_path)
+                        client_socket.send(f"START {selected_file} {file_size}".encode('utf-8'))
+                        while chunk := f.read(1024):
+                            client_socket.send(chunk)
+                        client_socket.send(b"END_OF_FILE")
+                        print(f"File '{selected_file}' sent successfully.")
+                except FileNotFoundError:
+                    print(f"File '{selected_file}' not found.")
+
+        # Handle disconnect (Option 5)
+        elif choice == "5":
             print("Disconnected from server.")
             break
+
+        # Handle invalid options
+        else:
+            error_message = client_socket.recv(1024).decode('utf-8')
+            print(error_message, end='')
 
 def main():
     print("P2P Secure File Sharing Application\n")
