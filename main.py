@@ -320,6 +320,7 @@ class SocketServer:
 
         if requested_file in files:
             # Ask the server user for consent
+            print("\nIf you get 'Invalid command. Type 'help' for a list of commands.' type 'yes' and press enter and then type 'yes' again and press enter to make it work")
             print(f"Client requested '{requested_file}'. Allow? (yes/no): ", end="")
             sys.stdout.flush()
 
@@ -373,6 +374,7 @@ class SocketServer:
 
         if selected_file in files:
             # Ask the server user for consent
+            print("\nIf you get 'Invalid command. Type 'help' for a list of commands.' type 'yes' and press enter and then type 'yes' again and press enter to make it work")
             print(f"Do you accept the file '{selected_file}'? (yes/no): ", end="")
             sys.stdout.flush()
 
